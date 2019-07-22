@@ -1,34 +1,52 @@
-sudo: required
-
-language: generic
+language: minimal
+services: docker
 
 env:
   - DOCKER_COMPOSE_VERSION=1.14.0
 
-install:
-  # Installing docker
-  - curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
-  - sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+before_install:
   - sudo apt-get update
-  - sudo apt-get -y install docker-ce
+  - sudo apt-get install -y expect jq
 
-  # Installing docker-compose
-  - sudo rm /usr/local/bin/docker-compose
-  - curl -L "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-$(uname -s)-$(uname -m)" > docker-compose
-  - chmod +x docker-compose
-  - sudo mv docker-compose /usr/local/bin
-
-before_script:
-  # Check docker & docker-compose versions
-  - docker --version
+install:
+  # Install Docker Compose
+  - curl -L "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-$(uname -s)-$(uname -m)" -o "$HOME/bin/docker-compose"
+  - chmod +x "$HOME/bin/docker-compose"
   - docker-compose --version
 
-script:
+before_script:
+  # Build images
   - docker-compose build
-  - docker-compose up -d
 
-  # Verifications
+  # Use built-in users
+  - sed -i 's/\(elasticsearch.username:\) elastic/\1 kibana/g' kibana/config/kibana.yml
+  - sed -i 's/\(xpack.monitoring.elasticsearch.username:\) elastic/\1 logstash_system/g' logstash/config/logstash.yml
+
+script:
+  # Compose
+  - docker-compose up -d elasticsearch
+  - sleep 20
+  - .travis/elasticsearch-setup-passwords.exp
+  - docker-compose up -d
+  - .travis/run-tests.sh
+  - docker-compose ps
+  - docker-compose logs elasticsearch
+  - docker-compose logs kibana
+  - docker-compose logs logstash
+  - docker-compose down -v
+
+  # Swarm
+  - docker swarm init
+  - docker stack deploy -c ./docker-stack.yml elk
+  - docker service scale elk_kibana=0 --detach=false
+  - docker service scale elk_logstash=0 --detach=false
   - sleep 30
-  - docker-compose logs
-  - curl --retry 10 --retry-delay 5 -D- http://localhost:9200/
-  - curl --retry 10 --retry-delay 5 -D- http://localhost:5601/api/status
+  - .travis/elasticsearch-setup-passwords.exp swarm
+  - docker service scale elk_kibana=1 --detach=false
+  - docker service scale elk_logstash=1 --detach=false
+  - .travis/run-tests.sh swarm
+  - docker stack services elk
+  - docker service logs elk_elasticsearch
+  - docker service logs elk_kibana
+  - docker service logs elk_logstash
+  - docker stack rm elk
